@@ -1,0 +1,45 @@
+APP_NAME=zanburak-worker
+APP_ENV=production
+APP_KEY=
+APP_DEBUG=true
+APP_URL=https://worker.zanburak.ir
+
+LOG_CHANNEL=stack
+LOG_LEVEL=debug
+
+DB_CONNECTION=mysql
+DB_HOST=localhost
+DB_PORT=3306
+DB_DATABASE=zanburak
+DB_USERNAME=miladmahaki
+DB_PASSWORD=Milad@4970
+
+CACHE_DRIVER=file
+
+FILESYSTEM_DISK=local
+
+QUEUE_CONNECTION=database
+QUEUE_FAILED_DRIVER=database-uuids
+
+# FTP disks (override if different)
+STATIC_HOST=185.252.28.150
+STATIC_USERNAME=zanburak
+STATIC_PASSWORD=
+STATIC_URL=https://static.zanburak.ir
+STATIC_ROOT=/public_html
+
+DL_HOST=185.252.28.150
+DL_USERNAME=dlmahakw
+DL_PASSWORD=
+DL_ROOT=/public_html
+
+# Upload token secret MUST match backend
+UPLOAD_TOKEN_SECRET=8f3f0a2b0b4b9d6b7f3e2a961f0c4d9bbd1a2f36e7c4b8a0d93c6efb1d7a3c5
+
+# Optional FFmpeg
+FFMPEG_BINARIES=/usr/bin/ffmpeg
+FFPROBE_BINARIES=/usr/bin/ffprobe
+
+FONT_TTF_FOR_WATERMARK=storage/app/fonts/CooperBlack.TTF
+
+

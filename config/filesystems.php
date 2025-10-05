@@ -47,6 +47,26 @@ return [
             'report' => false,
         ],
 
+        'static' => [
+            'driver' => 'ftp',
+            'host' => env('STATIC_HOST', '185.252.28.150'),
+            'username' => env('STATIC_USERNAME', 'zanburak'),
+            'password' => env('STATIC_PASSWORD', 'r*9IX)dR91Yu3n'),
+            'url' => env('STATIC_URL', 'https://static.zanburak.ir'),
+            'root' => env('STATIC_ROOT', '/public_html'),
+            // 'passive' => true,
+            // 'throw' => true,
+        ],
+
+        'dl' => [
+            'driver' => 'ftp',
+            'host' => env('DL_HOST', '185.252.28.150'),
+            'username' => env('DL_USERNAME', 'dlmahakw'),
+            'password' => env('DL_PASSWORD', ''),
+            'root' => env('DL_ROOT', '/public_html'),
+            'throw' => true,
+        ],
+
         's3' => [
             'driver' => 's3',
             'key' => env('AWS_ACCESS_KEY_ID'),
