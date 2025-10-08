@@ -9,6 +9,7 @@ use App\Services\VerifyUploadTokenService;
 use App\Models\Video;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\DB;
+use ProtoneMedia\LaravelFFMpeg\Support\FFMpeg;
 
 class UploadController extends Controller
 {
@@ -44,7 +45,7 @@ class UploadController extends Controller
             return response()->json(['message' => 'File too large'], 422);
         }
 
-        // Skip duration probing here to return response faster
+        // Default duration before probing
         $duration = 0;
 
         try {
@@ -61,6 +62,19 @@ class UploadController extends Controller
         } catch (\Throwable $e) {
             Log::error("Upload exception on write (putFileAs)", ['error' => $e->getMessage(), 'disk' => $disk, 'path' => $claims['path']]);
             return response()->json(['message' => 'Failed to store file', 'error' => $e->getMessage()], 500);
+        }
+
+        // Probe duration using FFMpeg (fallback to ffprobe)
+        try {
+            $duration = (int) round(FFMpeg::fromDisk($disk)->open($claims['path'])->getDurationInSeconds());
+        } catch (\Throwable $e) {
+            try {
+                $absolutePath = Storage::disk($disk)->path($claims['path']);
+                $duration = $this->getVideoDuration($absolutePath);
+            } catch (\Throwable $inner) {
+                Log::warning('Duration probing failed', ['error' => $inner->getMessage(), 'disk' => $disk, 'path' => $claims['path']]);
+                $duration = 0;
+            }
         }
 
         // Insert raw video record with computed duration

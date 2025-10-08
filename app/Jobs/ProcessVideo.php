@@ -46,6 +46,19 @@ class ProcessVideo implements ShouldQueue
         $videoableType = $this->video->videoable_type;
         $videoableId = $this->video->videoable_id;
 
+        // Ensure duration is set (compute if missing)
+        if ((int)($this->video->duration ?? 0) <= 0) {
+            try {
+                $computed = (int) round(FFMpeg::fromDisk($disk)->open($rawPath)->getDurationInSeconds());
+                if ($computed > 0) {
+                    DB::table('videos')->where('id', $this->video->id)->update(['duration' => $computed, 'updated_at' => now()]);
+                    $this->video->duration = $computed;
+                }
+            } catch (\Throwable $e) {
+                // ignore; derived records will still be created
+            }
+        }
+
         $availableQualities = $this->detectAvailableQualities($disk, $rawPath);
         if (empty($availableQualities)) {
             $availableQualities = [720, 480, 360];
