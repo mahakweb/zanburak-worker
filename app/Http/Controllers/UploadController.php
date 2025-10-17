@@ -77,19 +77,38 @@ class UploadController extends Controller
             }
         }
 
+        // Handle different videoable types
+        $videoableId = $claims['episodeId'] ?? $claims['courseId'] ?? $claims['pathId'];
+        $videoableType = isset($claims['episodeId']) ? 'App\\Models\\Episode' : 
+                        (isset($claims['courseId']) ? 'App\\Models\\Course' : 'App\\Models\\Path');
+        
+        if ($videoableType !== 'App\\Models\\Path') {
+            $this->removeOldVideos($videoableId, $videoableType);
+        }
+
+        // Determine if video should be processed
+        $shouldProcess = (bool)($claims['process'] ?? true);
+        
         // Insert raw video record with computed duration
         $video = Video::create([
             'type' => 'raw',
             'path' => $claims['path'],
             'disk' => $disk,
             'duration' => (int) $duration,
-            'videoable_id' => $claims['episodeId'] ?? $claims['courseId'],
-            'videoable_type' => isset($claims['episodeId']) ? 'App\\Models\\Episode' : 'App\\Models\\Course',
-            'status' => 'queued',
+            'videoable_id' => $videoableId,
+            'videoable_type' => $videoableType,
+            'status' => $shouldProcess ? 'queued' : 'uploaded',
         ]);
 
-        // Dispatch processing job asynchronously to dedicated 'videos' queue
-        \App\Jobs\ProcessVideo::dispatch($video)->onConnection('database')->onQueue('videos');
+        // Update episode duration if this is an episode video
+        if (isset($claims['episodeId'])) {
+            $this->updateEpisodeDuration($claims['episodeId'], (int) $duration);
+        }
+
+        // Dispatch processing job only if process flag is true (default: true)
+        if ($shouldProcess) {
+            \App\Jobs\ProcessVideo::dispatch($video)->onConnection('database')->onQueue('videos');
+        }
 
         $diskUrl = config("filesystems.disks.$disk.url");
         $publicUrl = $diskUrl ? rtrim($diskUrl, '/') . '/' . ltrim($claims['path'] ?? '', '/') : ($claims['path'] ?? '');
@@ -156,12 +175,24 @@ class UploadController extends Controller
         $url = $diskUrl ? rtrim($diskUrl, '/') . '/' . ltrim($claims['path'], '/') : $claims['path'];
 
         if (($claims['type'] ?? null) === 'poster' && isset($claims['courseId'])) {
+            // Delete old poster before updating
+            $this->removeOldCoursePoster($claims['courseId']);
             DB::table('courses')->where('id', $claims['courseId'])->update(['poster' => $url, 'updated_at' => now()]);
+        } elseif (($claims['type'] ?? null) === 'poster' && isset($claims['pathId'])) {
+            // Update path poster
+            DB::table('paths')->where('id', $claims['pathId'])->update(['poster' => $url, 'updated_at' => now()]);
+        } elseif (($claims['type'] ?? null) === 'attachment' && isset($claims['pathId'])) {
+            // Update path icon
+            DB::table('paths')->where('id', $claims['pathId'])->update(['icon' => $url, 'updated_at' => now()]);
         } else {
-            // attaches table is polymorphic
+            // Delete old attachments before inserting new one
             $attachableType = isset($claims['episodeId']) ? 'App\\Models\\Episode' : 'App\\Models\\Course';
+            $attachableId = $claims['episodeId'] ?? $claims['courseId'];
+            $this->removeOldAttachments($attachableId, $attachableType);
+            
+            // attaches table is polymorphic
             DB::table('attaches')->insert([
-                'attachable_id' => $claims['episodeId'] ?? $claims['courseId'],
+                'attachable_id' => $attachableId,
                 'attachable_type' => $attachableType,
                 'title' => 'پیوست',
                 'url' => $url,
@@ -174,6 +205,124 @@ class UploadController extends Controller
             'message' => 'File uploaded successfully.',
             'url' => $url,
         ], 200);
+    }
+
+    /**
+     * Remove old course poster
+     */
+    private function removeOldCoursePoster($courseId)
+    {
+        $course = DB::table('courses')->where('id', $courseId)->first();
+        if ($course && $course->poster) {
+            $this->deleteFileFromUrl($course->poster);
+        }
+    }
+
+    /**
+     * Remove old attachments for course or episode
+     */
+    private function removeOldAttachments($attachableId, $attachableType)
+    {
+        $attachments = DB::table('attaches')
+            ->where('attachable_id', $attachableId)
+            ->where('attachable_type', $attachableType)
+            ->get();
+
+        foreach ($attachments as $attachment) {
+            $this->deleteFileFromUrl($attachment->url);
+        }
+
+        // Delete from database
+        DB::table('attaches')
+            ->where('attachable_id', $attachableId)
+            ->where('attachable_type', $attachableType)
+            ->delete();
+    }
+
+    /**
+     * Remove old videos for course or episode
+     */
+    private function removeOldVideos($videoableId, $videoableType)
+    {
+        $videos = DB::table('videos')
+            ->where('videoable_id', $videoableId)
+            ->where('videoable_type', $videoableType)
+            ->get();
+
+        foreach ($videos as $video) {
+            $this->deleteVideoFiles($video);
+        }
+
+        // If this is an episode, reset its duration to 0
+        if ($videoableType === 'App\\Models\\Episode') {
+            $this->updateEpisodeDuration($videoableId, 0);
+        }
+
+        // Delete from database
+        DB::table('videos')
+            ->where('videoable_id', $videoableId)
+            ->where('videoable_type', $videoableType)
+            ->delete();
+    }
+
+    /**
+     * Delete video files from storage
+     */
+    private function deleteVideoFiles($video)
+    {
+        $folderPath = dirname($video->path);
+        $storage = Storage::disk($video->disk);
+        
+        if ($video->type == 'raw' && Storage::disk($video->disk)->exists($video->path)) {
+            if ($storage->exists($folderPath)) {
+                $files = $storage->allFiles($folderPath);
+                foreach ($files as $file) {
+                    $storage->delete($file);
+                }
+                $storage->deleteDirectory($folderPath);
+            }
+        } else if (Storage::disk($video->disk)->exists($video->path)) {
+            Storage::disk($video->disk)->delete($video->path);
+            $storage->deleteDirectory($folderPath);
+        }
+    }
+
+    /**
+     * Update episode duration
+     */
+    private function updateEpisodeDuration($episodeId, $duration)
+    {
+        DB::table('episodes')
+            ->where('id', $episodeId)
+            ->update([
+                'total_time' => $duration,
+                'updated_at' => now()
+            ]);
+    }
+
+    /**
+     * Delete file from storage based on URL
+     */
+    private function deleteFileFromUrl($url)
+    {
+        if (!$url) {
+            return;
+        }
+
+        foreach (config('filesystems.disks') as $disk => $config) {
+            if (!isset($config['url'])) {
+                continue;
+            }
+
+            $baseUrl = rtrim($config['url'], '/');
+            if (str_starts_with($url, $baseUrl)) {
+                $relativePath = ltrim(str_replace($baseUrl, '', $url), '/');
+                if (Storage::disk($disk)->exists($relativePath)) {
+                    Storage::disk($disk)->delete($relativePath);
+                }
+                break;
+            }
+        }
     }
 
     public function status(Video $video)
