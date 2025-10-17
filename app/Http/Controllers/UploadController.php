@@ -82,9 +82,8 @@ class UploadController extends Controller
         $videoableType = isset($claims['episodeId']) ? 'App\\Models\\Episode' : 
                         (isset($claims['courseId']) ? 'App\\Models\\Course' : 'App\\Models\\Path');
         
-        if ($videoableType !== 'App\\Models\\Path') {
-            $this->removeOldVideos($videoableId, $videoableType);
-        }
+        // Always remove old videos for the target (Course/Episode/Path) before inserting new one
+        $this->removeOldVideos($videoableId, $videoableType);
 
         // Determine if video should be processed
         $shouldProcess = (bool)($claims['process'] ?? true);
@@ -175,14 +174,16 @@ class UploadController extends Controller
         $url = $diskUrl ? rtrim($diskUrl, '/') . '/' . ltrim($claims['path'], '/') : $claims['path'];
 
         if (($claims['type'] ?? null) === 'poster' && isset($claims['courseId'])) {
-            // Delete old poster before updating
+            // Delete old course poster and null field, then update to new URL
             $this->removeOldCoursePoster($claims['courseId']);
             DB::table('courses')->where('id', $claims['courseId'])->update(['poster' => $url, 'updated_at' => now()]);
         } elseif (($claims['type'] ?? null) === 'poster' && isset($claims['pathId'])) {
-            // Update path poster
+            // Delete old path poster and null field, then update to new URL
+            $this->removeOldPathPoster($claims['pathId']);
             DB::table('paths')->where('id', $claims['pathId'])->update(['poster' => $url, 'updated_at' => now()]);
         } elseif (($claims['type'] ?? null) === 'attachment' && isset($claims['pathId'])) {
-            // Update path icon
+            // Delete old path icon and null field, then update to new URL
+            $this->removeOldPathIcon($claims['pathId']);
             DB::table('paths')->where('id', $claims['pathId'])->update(['icon' => $url, 'updated_at' => now()]);
         } else {
             // Delete old attachments before inserting new one
@@ -215,6 +216,31 @@ class UploadController extends Controller
         $course = DB::table('courses')->where('id', $courseId)->first();
         if ($course && $course->poster) {
             $this->deleteFileFromUrl($course->poster);
+            DB::table('courses')->where('id', $courseId)->update(['poster' => null, 'updated_at' => now()]);
+        }
+    }
+
+    /**
+     * Remove old path poster: delete file and set DB field to null
+     */
+    private function removeOldPathPoster($pathId)
+    {
+        $path = DB::table('paths')->where('id', $pathId)->first();
+        if ($path && $path->poster) {
+            $this->deleteFileFromUrl($path->poster);
+            DB::table('paths')->where('id', $pathId)->update(['poster' => null, 'updated_at' => now()]);
+        }
+    }
+
+    /**
+     * Remove old path icon: delete file and set DB field to null
+     */
+    private function removeOldPathIcon($pathId)
+    {
+        $path = DB::table('paths')->where('id', $pathId)->first();
+        if ($path && $path->icon) {
+            $this->deleteFileFromUrl($path->icon);
+            DB::table('paths')->where('id', $pathId)->update(['icon' => null, 'updated_at' => now()]);
         }
     }
 
