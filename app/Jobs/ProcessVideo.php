@@ -19,6 +19,7 @@ class ProcessVideo implements ShouldQueue
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
     protected Video $video;
+    public $timeout = 3600;
 
     public function __construct(Video $video)
     {
