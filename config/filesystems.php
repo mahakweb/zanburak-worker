@@ -55,7 +55,7 @@ return [
             'url' => env('STATIC_URL', 'https://static.zanburak.ir'),
             'root' => env('STATIC_ROOT', '/public_html'),
             // 'passive' => true,
-            // 'throw' => true,
+            'throw' => true,
         ],
 
         'dl' => [

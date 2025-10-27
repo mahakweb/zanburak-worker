@@ -9,7 +9,8 @@
         "php": "^8.2",
         "laravel/framework": "^12.0",
         "laravel/tinker": "^2.10.1",
-        "pbmedia/laravel-ffmpeg": "^8.2",
+        "league/flysystem-ftp": "^3.29",
+        "pbmedia/laravel-ffmpeg": "*",
         "php-ffmpeg/php-ffmpeg": "^1.2"
     },
     "require-dev": {

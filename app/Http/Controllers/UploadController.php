@@ -57,11 +57,11 @@ class UploadController extends Controller
             $ok = Storage::disk($disk)->putFileAs($dir, $file, $basename);
             if (!$ok) {
                 Log::error("Upload failed to write file (putFileAs)", ['disk' => $disk, 'dir' => $dir, 'name' => $basename]);
-                return response()->json(['message' => 'Failed to store file'], 500);
+                return response()->json(['message' => 'Failed to store file 1'], 500);
             }
         } catch (\Throwable $e) {
             Log::error("Upload exception on write (putFileAs)", ['error' => $e->getMessage(), 'disk' => $disk, 'path' => $claims['path']]);
-            return response()->json(['message' => 'Failed to store file', 'error' => $e->getMessage()], 500);
+            return response()->json(['message' => 'Failed to store file 2', 'error' => $e->getMessage()], 500);
         }
 
         // Probe duration using FFMpeg (fallback to ffprobe)
@@ -162,11 +162,11 @@ class UploadController extends Controller
             $ok = Storage::disk($disk)->putFileAs($dir, $file, $basename);
             if (!$ok) {
                 Log::error("Attachment failed to write file (putFileAs)", ['disk' => $disk, 'dir' => $dir, 'name' => $basename]);
-                return response()->json(['message' => 'Failed to store file', "ok" => $ok], 500);
+                return response()->json(['message' => 'Failed to store file 3', "ok" => $ok], 500);
             }
         } catch (\Throwable $e) {
             Log::error("Attachment exception on write (putFileAs)", ['error' => $e->getMessage(), 'disk' => $disk, 'path' => $claims['path']]);
-            return response()->json(['message' => 'Failed to store file'], 500);
+            return response()->json(['message' => 'Failed to store file 4'], 500);
         }
 
         // Persist attachment URL to DB using shared models (course/episode relation)
