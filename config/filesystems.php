@@ -54,7 +54,7 @@ return [
             'password' => env('STATIC_PASSWORD', 'r*9IX)dR91Yu3n'),
             'url' => env('STATIC_URL', 'https://static.zanburak.ir'),
             'root' => env('STATIC_ROOT', '/public_html'),
-            // 'passive' => true,
+            'passive' => true,
             'throw' => true,
         ],
 
