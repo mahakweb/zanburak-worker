@@ -1,0 +1,110 @@
+عالی 👌 چون پروژه‌ات پردازش ویدیو انجام میده (Jobهای سنگین، طولانی و CPU‌بر)، باید تنظیمات queue workerت هم طوری باشه که:
+
+پایدار بمونه حتی اگر ساعت‌ها کار کنه
+
+مصرف RAM کنترل‌شده باشه
+
+Jobها با خطای موقت retry بشن
+
+در صورت کرش یا ریستارت VPS، خودکار بالا بیاد
+
+بریم مرحله‌به‌مرحله تنظیمش کنیم 👇
+
+🧩 مرحله ۱: نصب Supervisor
+
+Supervisor ابزار رسمی و استاندارد برای اجرای مداوم صف‌هاست.
+
+sudo apt update
+sudo apt install supervisor -y
+
+⚙️ مرحله ۲: ساخت فایل تنظیمات صف لاراول
+
+فایل تنظیمات هر سرویس داخل /etc/supervisor/conf.d/ قرار می‌گیره.
+مثلاً برای پروژه‌ات یه فایل بساز:
+
+sudo nano /etc/supervisor/conf.d/laravel-queue.conf
+
+🧰 مرحله ۳: محتویات پیشنهادی (نسخه بهینه برای پردازش ویدیو)
+
+فرض کنیم مسیر پروژه‌ات اینه:
+
+/var/www/myapp
+
+
+(اگر فرق داره، بگو تا مسیر رو بر اساسش اصلاح کنم.)
+
+محتوای فایل:
+
+[program:laravel-queue]
+process_name=%(program_name)s_%(process_num)02d
+command=php /var/www/myapp/artisan queue:work --queue=default --sleep=5 --tries=5 --max-time=1800 --memory=512
+autostart=true
+autorestart=true
+stopasgroup=true
+killasgroup=true
+numprocs=2
+redirect_stderr=true
+stdout_logfile=/var/www/myapp/storage/logs/laravel-queue.log
+
+📘 توضیح کامل تنظیمات:
+گزینه	توضیح
+command	اجرای queue worker با پارامترهای بهینه
+--sleep=5	هر ۵ ثانیه صف رو چک می‌کنه → CPU کمتر درگیر میشه
+--tries=5	هر job تا ۵ بار retry میشه قبل از failure
+--max-time=1800	هر ۳۰ دقیقه worker ریست میشه (برای آزادسازی RAM)
+--memory=512	اگر مصرف حافظه از ۵۱۲ مگ بیشتر شد، worker ریست میشه
+numprocs=2	دو worker همزمان اجرا می‌شن (پردازش موازی ۲ job)
+autostart=true	در بوت خودکار اجرا میشه
+autorestart=true	در صورت خطا یا کرش دوباره بالا میاد
+stdout_logfile	مسیر لاگ مخصوص queue worker
+🚀 مرحله ۴: بارگذاری و اجرای تنظیمات
+
+بعد از ذخیره فایل، این دستورات رو اجرا کن:
+
+sudo supervisorctl reread
+sudo supervisorctl update
+sudo supervisorctl start laravel-queue:*
+
+🧾 مرحله ۵: بررسی وضعیت صف‌ها
+
+برای دیدن وضعیت Workerها:
+
+sudo supervisorctl status
+
+
+باید چیزی شبیه این ببینی:
+
+laravel-queue:laravel-queue_00   RUNNING   pid 1234, uptime 0:15:23
+laravel-queue:laravel-queue_01   RUNNING   pid 1245, uptime 0:15:23
+
+🔁 مرحله ۶: اطمینان از اجرای خودکار در بوت
+
+Supervisor خودش با بوت سیستم بالا میاد، ولی برای اطمینان:
+
+sudo systemctl enable supervisor
+sudo systemctl start supervisor
+
+🧩 مرحله ۷: بررسی لاگ‌ها
+
+اگر خواستی ببینی queue worker در حال انجام چه کاریه:
+
+tail -f /var/www/myapp/storage/logs/laravel-queue.log
+
+⚠️ مرحله ۸: تغییرات در آینده
+
+اگر فایل تنظیمات رو تغییر دادی، همیشه بعدش اجرا کن:
+
+sudo supervisorctl reread
+sudo supervisorctl update
+sudo supervisorctl restart laravel-queue:*
+
+
+✅ با این تنظیمات:
+
+صف همیشه در حال اجراست.
+
+در صورت کرش، خودکار ری‌استارت میشه.
+
+مصرف حافظه کنترل‌شده است.
+
+و اگر VPS ری‌استارت بشه، صف‌ها خودشون بالا میان.

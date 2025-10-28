@@ -137,16 +137,27 @@ class ProcessVideo implements ShouldQueue
         $hlsPath = $outputPath;
         $masterPlaylistPath = "{$hlsPath}/playlist.m3u8";
 
+        // Limit qualities for trailers to reduce file size
+        $trailerQualities = array_slice($qualities, 0, 3); // Only use top 3 qualities
+
         $exporter = FFMpeg::fromDisk($disk)
             ->open($inputPath)
             ->exportForHLS()
             ->toDisk($disk)
             ->setSegmentLength(10);
 
-        foreach ($qualities as $quality) {
-            $bitrate = $this->bitrateFor($quality);
+        foreach ($trailerQualities as $quality) {
+            $bitrate = $this->bitrateForTrailer($quality);
             [$width, $height] = $this->dimensionsFor($quality);
-            $format = (new X264('aac'))->setKiloBitrate($bitrate);
+            $format = (new X264('aac'))
+                ->setKiloBitrate($bitrate)
+                ->setAdditionalParameters([
+                    '-preset', 'fast',
+                    '-profile:v', 'main',
+                    '-crf', '24', // Higher CRF for smaller files
+                    '-maxrate', $bitrate . 'k',
+                    '-bufsize', ($bitrate * 2) . 'k'
+                ]);
             $exporter->addFormat($format, function ($media) use ($width, $height) {
                 $media->scale($width, $height);
             });
@@ -212,6 +223,19 @@ class ProcessVideo implements ShouldQueue
             720 => 1500,
             1080 => 3000,
             default => 1500,
+        };
+    }
+
+    private function bitrateForTrailer(int $quality): int
+    {
+        return match ($quality) {
+            144 => 150,
+            240 => 200,
+            360 => 300,
+            480 => 500,
+            720 => 800,
+            1080 => 1200,
+            default => 800,
         };
     }
 
