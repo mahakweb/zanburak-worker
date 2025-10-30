@@ -1,4 +1,5 @@
 <?php 
+namespace App\Jobs;
 use App\Models\Video;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
