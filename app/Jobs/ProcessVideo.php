@@ -199,14 +199,9 @@ class ProcessVideo implements ShouldQueue
         // Use all detected qualities up to source height
         $streamQualities = $qualities;
 
-        // Prepare a single static key under global key folder on the download host
-        $parts = explode('/', $outputPath);
-        if (count($parts) >= 3) {
-            $keyRelStoragePath = "key/{$parts[1]}/{$parts[2]}/video.key";
-        } else {
-            $keyRelStoragePath = "key/video.key";
-        }
-        $keyStorageDir = dirname($keyRelStoragePath);
+        // Prepare a single static key next to the playlist to ensure tmp write succeeds
+        $keyRelStoragePath = "{$hlsPath}/video.key";
+        $keyStorageDir = $hlsPath;
         try {
             if (!Storage::disk($disk)->exists($keyStorageDir)) {
                 Storage::disk($disk)->makeDirectory($keyStorageDir);
@@ -216,12 +211,7 @@ class ProcessVideo implements ShouldQueue
                 Storage::disk($disk)->put($keyRelStoragePath, $keyBytes);
             }
             $keyBytes = Storage::disk($disk)->get($keyRelStoragePath);
-            $diskUrl = (string) config("filesystems.disks.$disk.url");
-            if (!empty($diskUrl)) {
-                $keyUrl = rtrim($diskUrl, '/') . '/' . ltrim($keyRelStoragePath, '/');
-            } else {
-                $keyUrl = $keyRelStoragePath; // fallback to relative
-            }
+            $keyUrl = 'video.key';
         } catch (\Throwable $e) {
             Log::warning('Failed to prepare static HLS key', ['path' => $keyRelStoragePath, 'error' => $e->getMessage()]);
             // Fallback: generate in-memory key if storage failed
