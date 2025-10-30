@@ -1,7 +1,4 @@
-<?php
-
-namespace App\Jobs;
-
+<?php 
 use App\Models\Video;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -19,12 +16,12 @@ class ProcessVideo implements ShouldQueue
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
     protected Video $video;
-    public $timeout = 3600;
+    public $timeout = 7200;
 
     public function __construct(Video $video)
     {
         $this->video = $video;
-        
+
     }
 
     public function handle(): void
@@ -87,8 +84,6 @@ class ProcessVideo implements ShouldQueue
             $downloadBase = "download/{$courseSlug}/{$episodeId}";
 
             $this->processStream($disk, $rawPath, $streamPath, $availableQualities);
-
-            // Generate downloads for all available qualities
             foreach ($availableQualities as $quality) {
                 $this->processDownload($disk, $rawPath, "$downloadBase/{$quality}p", $quality);
             }
@@ -139,36 +134,16 @@ class ProcessVideo implements ShouldQueue
         $hlsPath = $outputPath;
         $masterPlaylistPath = "{$hlsPath}/playlist.m3u8";
 
-        // Ensure output directory exists to avoid write errors
-        try {
-            if (!Storage::disk($disk)->exists($hlsPath)) {
-                Storage::disk($disk)->makeDirectory($hlsPath);
-            }
-        } catch (\Throwable $e) {
-            Log::warning('Failed to prepare trailer HLS directory', ['path' => $hlsPath, 'error' => $e->getMessage()]);
-        }
-
-        // Use lower qualities for trailers to keep size small
-        $trailerQualities = array_slice($qualities, -2); // e.g., 360p/240p or 240p/144p
-
         $exporter = FFMpeg::fromDisk($disk)
             ->open($inputPath)
             ->exportForHLS()
             ->toDisk($disk)
             ->setSegmentLength(10);
 
-        foreach ($trailerQualities as $quality) {
-            $bitrate = $this->bitrateForTrailer($quality);
+        foreach ($qualities as $quality) {
+            $bitrate = $this->bitrateFor($quality);
             [$width, $height] = $this->dimensionsFor($quality);
-            $format = (new X264('aac'))
-                ->setKiloBitrate($bitrate)
-                ->setAdditionalParameters([
-                    '-preset', 'veryfast',
-                    '-profile:v', 'main',
-                    '-crf', '26', // higher CRF -> smaller file
-                    '-maxrate', $bitrate . 'k',
-                    '-bufsize', ($bitrate * 2) . 'k'
-                ]);
+            $format = (new X264('aac'))->setKiloBitrate($bitrate);
             $exporter->addFormat($format, function ($media) use ($width, $height) {
                 $media->scale($width, $height);
             });
@@ -187,60 +162,19 @@ class ProcessVideo implements ShouldQueue
         $hlsPath = $outputPath;
         $masterPlaylistPath = "{$hlsPath}/playlist.m3u8";
 
-        // Ensure output directory exists
-        try {
-            if (!Storage::disk($disk)->exists($hlsPath)) {
-                Storage::disk($disk)->makeDirectory($hlsPath);
-            }
-        } catch (\Throwable $e) {
-            Log::warning('Failed to prepare stream HLS directories', ['path' => $hlsPath, 'error' => $e->getMessage()]);
-        }
-
-        // Use all detected qualities up to source height
-        $streamQualities = $qualities;
-
-        // Prepare a single static key next to the playlist to ensure tmp write succeeds
-        $keyRelStoragePath = "{$hlsPath}/video.key";
-        $keyStorageDir = $hlsPath;
-        try {
-            if (!Storage::disk($disk)->exists($keyStorageDir)) {
-                Storage::disk($disk)->makeDirectory($keyStorageDir);
-            }
-            if (!Storage::disk($disk)->exists($keyRelStoragePath)) {
-                $keyBytes = random_bytes(16);
-                Storage::disk($disk)->put($keyRelStoragePath, $keyBytes);
-            }
-            $keyBytes = Storage::disk($disk)->get($keyRelStoragePath);
-            $keyUrl = 'video.key';
-        } catch (\Throwable $e) {
-            Log::warning('Failed to prepare static HLS key', ['path' => $keyRelStoragePath, 'error' => $e->getMessage()]);
-            // Fallback: generate in-memory key if storage failed
-            $keyBytes = random_bytes(16);
-            $keyUrl = 'video.key';
-        }
-
         $exporter = FFMpeg::fromDisk($disk)
             ->open($inputPath)
             ->exportForHLS()
             ->toDisk($disk)
-            ->setSegmentLength(6)
-            // Use one static key/URI for all renditions & segments
-            ->withEncryptionKey($keyBytes, $keyUrl);
+            ->setSegmentLength(10)
+            ->withRotatingEncryptionKey(function ($filename, $contents) use ($disk, $hlsPath) {
+                Storage::disk($disk)->put("{$hlsPath}/keys/{$filename}", $contents);
+            });
 
-        $sourceKbps = $this->estimateSourceBitrateKbps($disk, $inputPath);
-        foreach ($streamQualities as $quality) {
-            $bitrate = $this->dynamicBitrateFor($quality, $streamQualities, $sourceKbps);
+        foreach ($qualities as $quality) {
+            $bitrate = $this->bitrateFor($quality);
             [$width, $height] = $this->dimensionsFor($quality);
-            $format = (new X264('aac'))
-                ->setKiloBitrate($bitrate)
-                ->setAdditionalParameters([
-                    '-preset', 'veryfast',
-                    '-profile:v', 'main',
-                    '-crf', '24',
-                    '-maxrate', $bitrate . 'k',
-                    '-bufsize', ($bitrate * 2) . 'k',
-                    '-b:a', '96k'
-                ]);
+            $format = (new X264('aac'))->setKiloBitrate($bitrate);
             $exporter->addFormat($format, function ($media) use ($width, $height) {
                 $media->scale($width, $height);
             });
@@ -253,30 +187,13 @@ class ProcessVideo implements ShouldQueue
     private function processDownload(string $disk, string $inputPath, string $outputPath, int $quality): void
     {
         $storedPath = "$outputPath/video-{$quality}p.mp4";
-        $bitrateBase = $this->bitrateFor($quality);
-        // Dynamically cap by estimated source bitrate to avoid size bloat
-        $avail = $this->detectAvailableQualities($disk, $inputPath);
-        $maxQ = empty($avail) ? $quality : max($avail);
-        $sourceKbps = $this->estimateSourceBitrateKbps($disk, $inputPath);
-        $bitrate = $this->dynamicBitrateFor($quality, [$maxQ, $quality], $sourceKbps);
-        $bitrate = min($bitrate, $bitrateBase);
+        $bitrate = $this->bitrateFor($quality);
 
         FFMpeg::fromDisk($disk)
             ->open($inputPath)
             ->export()
             ->toDisk($disk)
-            ->inFormat((new X264('aac'))
-                ->setKiloBitrate($bitrate)
-                ->setAdditionalParameters([
-                    '-preset', 'veryfast',
-                    '-profile:v', 'main',
-                    '-crf', '23',
-                    '-maxrate', $bitrate . 'k',
-                    '-bufsize', ($bitrate * 2) . 'k',
-                    '-b:a', '128k',
-                    '-movflags', '+faststart'
-                ])
-            )
+            ->inFormat((new X264('aac'))->setKiloBitrate($bitrate))
             ->save($storedPath);
 
         $this->storeVideoRecord('download', $quality, $storedPath);
@@ -295,45 +212,6 @@ class ProcessVideo implements ShouldQueue
         };
     }
 
-    private function bitrateForTrailer(int $quality): int
-    {
-        return match ($quality) {
-            144 => 150,
-            240 => 200,
-            360 => 300,
-            480 => 500,
-            720 => 800,
-            1080 => 1200,
-            default => 800,
-        };
-    }
-
-    private function estimateSourceBitrateKbps(string $disk, string $inputPath): ?int
-    {
-        try {
-            $bytes = Storage::disk($disk)->size($inputPath);
-            $duration = (int)($this->video->duration ?? 0);
-            if ($bytes > 0 && $duration > 0) {
-                return max(200, (int) floor(($bytes * 8) / $duration / 1000));
-            }
-        } catch (\Throwable $e) {
-            // ignore, fallback will be used
-        }
-        return null;
-    }
-
-    private function dynamicBitrateFor(int $quality, array $allQualities, ?int $sourceKbps): int
-    {
-        $base = $this->bitrateFor($quality);
-        if (!$sourceKbps || empty($allQualities)) {
-            return $base;
-        }
-        $top = max($allQualities);
-        $capTop = max(800, (int) floor($sourceKbps * 0.8));
-        $scaled = (int) floor($capTop * ($quality / $top));
-        return max(150, min($base, $scaled));
-    }
-
     private function dimensionsFor(int $quality): array
     {
         return match ($quality) {
@@ -349,34 +227,16 @@ class ProcessVideo implements ShouldQueue
 
     private function storeVideoRecord(string $type, ?int $quality, string $path): void
     {
-        $unique = [
+        DB::table('videos')->insert([
             'videoable_id' => $this->video->videoable_id,
             'videoable_type' => $this->video->videoable_type,
             'disk' => $this->video->disk,
             'type' => $type,
             'path' => $path,
-        ];
-
-        $data = $unique + [
             'duration' => $this->video->duration,
             'quality' => $quality,
             'created_at' => now(),
             'updated_at' => now(),
-        ];
-
-        try {
-            $inserted = DB::table('videos')->insertOrIgnore([$data]);
-            if ($inserted === 0) {
-                DB::table('videos')->where($unique)->update([
-                    'duration' => $this->video->duration,
-                    'quality' => $quality,
-                    'updated_at' => now(),
-                ]);
-            }
-        } catch (\Throwable $e) {
-            Log::warning('storeVideoRecord failed', ['error' => $e->getMessage(), 'type' => $type, 'path' => $path]);
-        }
+        ]);
     }
 }
-
-
