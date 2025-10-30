@@ -212,7 +212,7 @@ class ProcessVideo implements ShouldQueue
             ->setSegmentLength(10)
             ->withRotatingEncryptionKey(function ($filename, $contents) use ($disk, $hlsPath) {
                 Storage::disk($disk)->put("{$hlsPath}/keys/{$filename}", $contents);
-            });
+            }, 9999);
 
         foreach ($streamQualities as $quality) {
             $bitrate = $this->bitrateFor($quality);
