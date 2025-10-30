@@ -349,17 +349,33 @@ class ProcessVideo implements ShouldQueue
 
     private function storeVideoRecord(string $type, ?int $quality, string $path): void
     {
-        DB::table('videos')->insert([
+        $unique = [
             'videoable_id' => $this->video->videoable_id,
             'videoable_type' => $this->video->videoable_type,
             'disk' => $this->video->disk,
             'type' => $type,
             'path' => $path,
+        ];
+
+        $data = $unique + [
             'duration' => $this->video->duration,
             'quality' => $quality,
             'created_at' => now(),
             'updated_at' => now(),
-        ]);
+        ];
+
+        try {
+            $inserted = DB::table('videos')->insertOrIgnore([$data]);
+            if ($inserted === 0) {
+                DB::table('videos')->where($unique)->update([
+                    'duration' => $this->video->duration,
+                    'quality' => $quality,
+                    'updated_at' => now(),
+                ]);
+            }
+        } catch (\Throwable $e) {
+            Log::warning('storeVideoRecord failed', ['error' => $e->getMessage(), 'type' => $type, 'path' => $path]);
+        }
     }
 }
 
