@@ -10,7 +10,7 @@ use App\Models\Video;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\DB;
 use ProtoneMedia\LaravelFFMpeg\Support\FFMpeg;
-
+use App\Jobs\ProcessVideo;
 class UploadController extends Controller
 {
     public function video(Request $request)
@@ -106,7 +106,7 @@ class UploadController extends Controller
 
         // Dispatch processing job only if process flag is true (default: true)
         if ($shouldProcess) {
-            \App\Jobs\ProcessVideo::dispatch($video)->onConnection('database')->onQueue('videos');
+            ProcessVideo::dispatch($video)->onConnection('database')->onQueue('videos');
         }
 
         $diskUrl = config("filesystems.disks.$disk.url");
