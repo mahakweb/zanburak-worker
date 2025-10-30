@@ -185,6 +185,26 @@ class ProcessVideo implements ShouldQueue
         $hlsPath = $outputPath;
         $masterPlaylistPath = "{$hlsPath}/playlist.m3u8";
 
+        // Ensure output and key directories exist
+        try {
+            if (!Storage::disk($disk)->exists($hlsPath)) {
+                Storage::disk($disk)->makeDirectory($hlsPath);
+            }
+            if (!Storage::disk($disk)->exists("{$hlsPath}/keys")) {
+                Storage::disk($disk)->makeDirectory("{$hlsPath}/keys");
+            }
+        } catch (\Throwable $e) {
+            Log::warning('Failed to prepare stream HLS directories', ['path' => $hlsPath, 'error' => $e->getMessage()]);
+        }
+
+        // Limit renditions to common streaming ladder to reduce size/time
+        $preferred = [720, 480, 360];
+        $streamQualities = array_values(array_intersect($qualities, $preferred));
+        if (empty($streamQualities)) {
+            // fallback: use the lowest two available
+            $streamQualities = array_slice($qualities, -2);
+        }
+
         $exporter = FFMpeg::fromDisk($disk)
             ->open($inputPath)
             ->exportForHLS()
@@ -194,10 +214,19 @@ class ProcessVideo implements ShouldQueue
                 Storage::disk($disk)->put("{$hlsPath}/keys/{$filename}", $contents);
             });
 
-        foreach ($qualities as $quality) {
+        foreach ($streamQualities as $quality) {
             $bitrate = $this->bitrateFor($quality);
             [$width, $height] = $this->dimensionsFor($quality);
-            $format = (new X264('aac'))->setKiloBitrate($bitrate);
+            $format = (new X264('aac'))
+                ->setKiloBitrate($bitrate)
+                ->setAdditionalParameters([
+                    '-preset', 'veryfast',
+                    '-profile:v', 'main',
+                    '-crf', '24',
+                    '-maxrate', $bitrate . 'k',
+                    '-bufsize', ($bitrate * 2) . 'k',
+                    '-b:a', '96k'
+                ]);
             $exporter->addFormat($format, function ($media) use ($width, $height) {
                 $media->scale($width, $height);
             });
