@@ -205,14 +205,32 @@ class ProcessVideo implements ShouldQueue
             $streamQualities = array_slice($qualities, -2);
         }
 
+        // Prepare a single static key for the whole stream (shared across renditions & segments)
+        $keyDir = "{$hlsPath}/keys";
+        $keyRelUri = "keys/video.key"; // relative to the master playlist
+        $keyPath = "{$keyDir}/video.key";
+        try {
+            if (!Storage::disk($disk)->exists($keyDir)) {
+                Storage::disk($disk)->makeDirectory($keyDir);
+            }
+            if (!Storage::disk($disk)->exists($keyPath)) {
+                $keyBytes = random_bytes(16);
+                Storage::disk($disk)->put($keyPath, $keyBytes);
+            }
+            $keyBytes = Storage::disk($disk)->get($keyPath);
+        } catch (\Throwable $e) {
+            Log::warning('Failed to prepare static HLS key', ['path' => $keyPath, 'error' => $e->getMessage()]);
+            // Fallback: generate in-memory key if storage failed
+            $keyBytes = random_bytes(16);
+        }
+
         $exporter = FFMpeg::fromDisk($disk)
             ->open($inputPath)
             ->exportForHLS()
             ->toDisk($disk)
             ->setSegmentLength(10)
-            ->withRotatingEncryptionKey(function ($filename, $contents) use ($disk, $hlsPath) {
-                Storage::disk($disk)->put("{$hlsPath}/keys/{$filename}", $contents);
-            }, 9999);
+            // Use one static key/URI for all renditions & segments
+            ->withEncryptionKey($keyBytes, $keyRelUri);
 
         foreach ($streamQualities as $quality) {
             $bitrate = $this->bitrateFor($quality);
