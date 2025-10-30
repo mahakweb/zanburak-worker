@@ -137,8 +137,17 @@ class ProcessVideo implements ShouldQueue
         $hlsPath = $outputPath;
         $masterPlaylistPath = "{$hlsPath}/playlist.m3u8";
 
-        // Limit qualities for trailers to reduce file size
-        $trailerQualities = array_slice($qualities, 0, 3); // Only use top 3 qualities
+        // Ensure output directory exists to avoid write errors
+        try {
+            if (!Storage::disk($disk)->exists($hlsPath)) {
+                Storage::disk($disk)->makeDirectory($hlsPath);
+            }
+        } catch (\Throwable $e) {
+            Log::warning('Failed to prepare trailer HLS directory', ['path' => $hlsPath, 'error' => $e->getMessage()]);
+        }
+
+        // Use lower qualities for trailers to keep size small
+        $trailerQualities = array_slice($qualities, -2); // e.g., 360p/240p or 240p/144p
 
         $exporter = FFMpeg::fromDisk($disk)
             ->open($inputPath)
@@ -152,9 +161,9 @@ class ProcessVideo implements ShouldQueue
             $format = (new X264('aac'))
                 ->setKiloBitrate($bitrate)
                 ->setAdditionalParameters([
-                    '-preset', 'fast',
+                    '-preset', 'veryfast',
                     '-profile:v', 'main',
-                    '-crf', '24', // Higher CRF for smaller files
+                    '-crf', '26', // higher CRF -> smaller file
                     '-maxrate', $bitrate . 'k',
                     '-bufsize', ($bitrate * 2) . 'k'
                 ]);
