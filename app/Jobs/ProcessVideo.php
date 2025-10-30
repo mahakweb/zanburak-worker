@@ -88,24 +88,8 @@ class ProcessVideo implements ShouldQueue
 
             $this->processStream($disk, $rawPath, $streamPath, $availableQualities);
 
-            // Limit downloads to reduce processing time & size
-            $durationSec = (int)($this->video->duration ?? 0);
-            if ($durationSec > 0 && $durationSec <= 60) {
-                // Very short videos: single download at 480p (or lowest available above 360)
-                $preferred = [480, 360];
-                $downloadQualities = array_values(array_intersect($availableQualities, $preferred));
-                if (empty($downloadQualities)) {
-                    $downloadQualities = [min(max($availableQualities), 480)];
-                }
-            } else {
-                // Normal videos: at most two downloads 720p and 480p if available
-                $preferred = [720, 480];
-                $downloadQualities = array_values(array_intersect($availableQualities, $preferred));
-                if (empty($downloadQualities)) {
-                    $downloadQualities = [max($availableQualities)];
-                }
-            }
-            foreach ($downloadQualities as $quality) {
+            // Generate downloads for all available qualities
+            foreach ($availableQualities as $quality) {
                 $this->processDownload($disk, $rawPath, "$downloadBase/{$quality}p", $quality);
             }
         }
@@ -203,59 +187,59 @@ class ProcessVideo implements ShouldQueue
         $hlsPath = $outputPath;
         $masterPlaylistPath = "{$hlsPath}/playlist.m3u8";
 
-        // Ensure output and key directories exist
+        // Ensure output directory exists
         try {
             if (!Storage::disk($disk)->exists($hlsPath)) {
                 Storage::disk($disk)->makeDirectory($hlsPath);
             }
-            if (!Storage::disk($disk)->exists("{$hlsPath}/keys")) {
-                Storage::disk($disk)->makeDirectory("{$hlsPath}/keys");
-            }
-            // Purge any leftover keys from previous runs to guarantee single-key behavior
-            try { Storage::disk($disk)->deleteDirectory("{$hlsPath}/keys"); } catch (\Throwable $e) {}
-            Storage::disk($disk)->makeDirectory("{$hlsPath}/keys");
         } catch (\Throwable $e) {
             Log::warning('Failed to prepare stream HLS directories', ['path' => $hlsPath, 'error' => $e->getMessage()]);
         }
 
-        // Limit renditions to reduce size/time (more aggressive for short videos)
-        $durationSec = (int)($this->video->duration ?? 0);
-        $preferred = ($durationSec > 0 && $durationSec <= 60) ? [480, 360] : [720, 480, 360];
-        $streamQualities = array_values(array_intersect($qualities, $preferred));
-        if (empty($streamQualities)) {
-            // fallback: use the lowest two available
-            $streamQualities = array_slice($qualities, -2);
-        }
+        // Use all detected qualities up to source height
+        $streamQualities = $qualities;
 
-        // Prepare a single static key for the whole stream (shared across renditions & segments)
-        $keyDir = "{$hlsPath}/keys";
-        $keyRelUri = "keys/video.key"; // relative to the master playlist
-        $keyPath = "{$keyDir}/video.key";
+        // Prepare a single static key under global key folder on the download host
+        $parts = explode('/', $outputPath);
+        if (count($parts) >= 3) {
+            $keyRelStoragePath = "key/{$parts[1]}/{$parts[2]}/video.key";
+        } else {
+            $keyRelStoragePath = "key/video.key";
+        }
+        $keyStorageDir = dirname($keyRelStoragePath);
         try {
-            if (!Storage::disk($disk)->exists($keyDir)) {
-                Storage::disk($disk)->makeDirectory($keyDir);
+            if (!Storage::disk($disk)->exists($keyStorageDir)) {
+                Storage::disk($disk)->makeDirectory($keyStorageDir);
             }
-            if (!Storage::disk($disk)->exists($keyPath)) {
+            if (!Storage::disk($disk)->exists($keyRelStoragePath)) {
                 $keyBytes = random_bytes(16);
-                Storage::disk($disk)->put($keyPath, $keyBytes);
+                Storage::disk($disk)->put($keyRelStoragePath, $keyBytes);
             }
-            $keyBytes = Storage::disk($disk)->get($keyPath);
+            $keyBytes = Storage::disk($disk)->get($keyRelStoragePath);
+            $diskUrl = (string) config("filesystems.disks.$disk.url");
+            if (!empty($diskUrl)) {
+                $keyUrl = rtrim($diskUrl, '/') . '/' . ltrim($keyRelStoragePath, '/');
+            } else {
+                $keyUrl = $keyRelStoragePath; // fallback to relative
+            }
         } catch (\Throwable $e) {
-            Log::warning('Failed to prepare static HLS key', ['path' => $keyPath, 'error' => $e->getMessage()]);
+            Log::warning('Failed to prepare static HLS key', ['path' => $keyRelStoragePath, 'error' => $e->getMessage()]);
             // Fallback: generate in-memory key if storage failed
             $keyBytes = random_bytes(16);
+            $keyUrl = 'video.key';
         }
 
         $exporter = FFMpeg::fromDisk($disk)
             ->open($inputPath)
             ->exportForHLS()
             ->toDisk($disk)
-            ->setSegmentLength(10)
+            ->setSegmentLength(6)
             // Use one static key/URI for all renditions & segments
-            ->withEncryptionKey($keyBytes, $keyRelUri);
+            ->withEncryptionKey($keyBytes, $keyUrl);
 
+        $sourceKbps = $this->estimateSourceBitrateKbps($disk, $inputPath);
         foreach ($streamQualities as $quality) {
-            $bitrate = $this->bitrateFor($quality);
+            $bitrate = $this->dynamicBitrateFor($quality, $streamQualities, $sourceKbps);
             [$width, $height] = $this->dimensionsFor($quality);
             $format = (new X264('aac'))
                 ->setKiloBitrate($bitrate)
@@ -279,13 +263,30 @@ class ProcessVideo implements ShouldQueue
     private function processDownload(string $disk, string $inputPath, string $outputPath, int $quality): void
     {
         $storedPath = "$outputPath/video-{$quality}p.mp4";
-        $bitrate = $this->bitrateFor($quality);
+        $bitrateBase = $this->bitrateFor($quality);
+        // Dynamically cap by estimated source bitrate to avoid size bloat
+        $avail = $this->detectAvailableQualities($disk, $inputPath);
+        $maxQ = empty($avail) ? $quality : max($avail);
+        $sourceKbps = $this->estimateSourceBitrateKbps($disk, $inputPath);
+        $bitrate = $this->dynamicBitrateFor($quality, [$maxQ, $quality], $sourceKbps);
+        $bitrate = min($bitrate, $bitrateBase);
 
         FFMpeg::fromDisk($disk)
             ->open($inputPath)
             ->export()
             ->toDisk($disk)
-            ->inFormat((new X264('aac'))->setKiloBitrate($bitrate))
+            ->inFormat((new X264('aac'))
+                ->setKiloBitrate($bitrate)
+                ->setAdditionalParameters([
+                    '-preset', 'veryfast',
+                    '-profile:v', 'main',
+                    '-crf', '23',
+                    '-maxrate', $bitrate . 'k',
+                    '-bufsize', ($bitrate * 2) . 'k',
+                    '-b:a', '128k',
+                    '-movflags', '+faststart'
+                ])
+            )
             ->save($storedPath);
 
         $this->storeVideoRecord('download', $quality, $storedPath);
@@ -315,6 +316,32 @@ class ProcessVideo implements ShouldQueue
             1080 => 1200,
             default => 800,
         };
+    }
+
+    private function estimateSourceBitrateKbps(string $disk, string $inputPath): ?int
+    {
+        try {
+            $bytes = Storage::disk($disk)->size($inputPath);
+            $duration = (int)($this->video->duration ?? 0);
+            if ($bytes > 0 && $duration > 0) {
+                return max(200, (int) floor(($bytes * 8) / $duration / 1000));
+            }
+        } catch (\Throwable $e) {
+            // ignore, fallback will be used
+        }
+        return null;
+    }
+
+    private function dynamicBitrateFor(int $quality, array $allQualities, ?int $sourceKbps): int
+    {
+        $base = $this->bitrateFor($quality);
+        if (!$sourceKbps || empty($allQualities)) {
+            return $base;
+        }
+        $top = max($allQualities);
+        $capTop = max(800, (int) floor($sourceKbps * 0.8));
+        $scaled = (int) floor($capTop * ($quality / $top));
+        return max(150, min($base, $scaled));
     }
 
     private function dimensionsFor(int $quality): array
