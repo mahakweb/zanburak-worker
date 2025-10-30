@@ -87,7 +87,25 @@ class ProcessVideo implements ShouldQueue
             $downloadBase = "download/{$courseSlug}/{$episodeId}";
 
             $this->processStream($disk, $rawPath, $streamPath, $availableQualities);
-            foreach ($availableQualities as $quality) {
+
+            // Limit downloads to reduce processing time & size
+            $durationSec = (int)($this->video->duration ?? 0);
+            if ($durationSec > 0 && $durationSec <= 60) {
+                // Very short videos: single download at 480p (or lowest available above 360)
+                $preferred = [480, 360];
+                $downloadQualities = array_values(array_intersect($availableQualities, $preferred));
+                if (empty($downloadQualities)) {
+                    $downloadQualities = [min(max($availableQualities), 480)];
+                }
+            } else {
+                // Normal videos: at most two downloads 720p and 480p if available
+                $preferred = [720, 480];
+                $downloadQualities = array_values(array_intersect($availableQualities, $preferred));
+                if (empty($downloadQualities)) {
+                    $downloadQualities = [max($availableQualities)];
+                }
+            }
+            foreach ($downloadQualities as $quality) {
                 $this->processDownload($disk, $rawPath, "$downloadBase/{$quality}p", $quality);
             }
         }
@@ -193,12 +211,16 @@ class ProcessVideo implements ShouldQueue
             if (!Storage::disk($disk)->exists("{$hlsPath}/keys")) {
                 Storage::disk($disk)->makeDirectory("{$hlsPath}/keys");
             }
+            // Purge any leftover keys from previous runs to guarantee single-key behavior
+            try { Storage::disk($disk)->deleteDirectory("{$hlsPath}/keys"); } catch (\Throwable $e) {}
+            Storage::disk($disk)->makeDirectory("{$hlsPath}/keys");
         } catch (\Throwable $e) {
             Log::warning('Failed to prepare stream HLS directories', ['path' => $hlsPath, 'error' => $e->getMessage()]);
         }
 
-        // Limit renditions to common streaming ladder to reduce size/time
-        $preferred = [720, 480, 360];
+        // Limit renditions to reduce size/time (more aggressive for short videos)
+        $durationSec = (int)($this->video->duration ?? 0);
+        $preferred = ($durationSec > 0 && $durationSec <= 60) ? [480, 360] : [720, 480, 360];
         $streamQualities = array_values(array_intersect($qualities, $preferred));
         if (empty($streamQualities)) {
             // fallback: use the lowest two available
