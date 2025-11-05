@@ -141,10 +141,11 @@ class ProcessVideo implements ShouldQueue
             ->toDisk($disk)
             ->setSegmentLength(10);
 
+        $sourceBitrateKbps = $this->probeSourceBitrateKbps($disk, $inputPath);
+
         foreach ($qualities as $quality) {
-            $bitrate = $this->bitrateFor($quality);
             [$width, $height] = $this->dimensionsFor($quality);
-            $format = (new X264('aac'))->setKiloBitrate($bitrate);
+            $format = $this->makeVideoFormatForQuality($quality, $sourceBitrateKbps);
             $exporter->addFormat($format, function ($media) use ($width, $height) {
                 $media->scale($width, $height);
             });
@@ -163,25 +164,47 @@ class ProcessVideo implements ShouldQueue
         $hlsPath = $outputPath;
         $masterPlaylistPath = "{$hlsPath}/playlist.m3u8";
 
-        $exporter = FFMpeg::fromDisk($disk)
-            ->open($inputPath)
-            ->exportForHLS()
-            ->toDisk($disk)
-            ->setSegmentLength(10)
-            ->withRotatingEncryptionKey(function ($filename, $contents) use ($disk, $hlsPath) {
-                Storage::disk($disk)->put("{$hlsPath}/keys/{$filename}", $contents);
-            });
+        $sourceBitrateKbps = $this->probeSourceBitrateKbps($disk, $inputPath);
+        $variantEntries = [];
 
         foreach ($qualities as $quality) {
-            $bitrate = $this->bitrateFor($quality);
             [$width, $height] = $this->dimensionsFor($quality);
-            $format = (new X264('aac'))->setKiloBitrate($bitrate);
-            $exporter->addFormat($format, function ($media) use ($width, $height) {
+            $videoFormat = $this->makeVideoFormatForQuality($quality, $sourceBitrateKbps);
+
+            $variantPath = "{$hlsPath}/{$quality}p";
+            Storage::disk($disk)->makeDirectory($variantPath);
+
+            $exporter = FFMpeg::fromDisk($disk)
+                ->open($inputPath)
+                ->exportForHLS()
+                ->toDisk($disk)
+                ->setSegmentLength(6)
+                // Use rotating API with a huge segmentsPerKey so effectively one key per quality,
+                // and store the key alongside the variant playlist
+                ->withRotatingEncryptionKey(function ($filename, $contents) use ($disk, $variantPath) {
+                    Storage::disk($disk)->put("{$variantPath}/{$filename}", $contents);
+                }, 1000000);
+
+            $exporter->addFormat($videoFormat, function ($media) use ($width, $height) {
                 $media->scale($width, $height);
             });
+
+            $variantPlaylistPath = "{$variantPath}/playlist.m3u8";
+            $exporter->save($variantPlaylistPath);
+
+            $videoBitrate = $this->bitrateFor($quality);
+            $audioBitrate = $this->audioBitrateFor($quality);
+            $bandwidth = (int) (($videoBitrate + $audioBitrate) * 1000); // in bits per second
+
+            $variantEntries[] = [
+                'quality' => $quality,
+                'resolution' => $width . 'x' . $height,
+                'bandwidth' => $bandwidth,
+                'uri' => "{$quality}p/playlist.m3u8",
+            ];
         }
 
-        $exporter->save($masterPlaylistPath);
+        $this->writeMasterPlaylist($disk, $hlsPath, $variantEntries);
         $this->storeVideoRecord('stream', null, $masterPlaylistPath);
     }
 
@@ -189,12 +212,29 @@ class ProcessVideo implements ShouldQueue
     {
         $storedPath = "$outputPath/video-{$quality}p.mp4";
         $bitrate = $this->bitrateFor($quality);
+        $audioBitrate = $this->audioBitrateFor($quality);
+        [$width, $height] = $this->dimensionsFor($quality);
+        $sourceBitrateKbps = $this->probeSourceBitrateKbps($disk, $inputPath);
+        if ($sourceBitrateKbps && $bitrate > $sourceBitrateKbps) {
+            $bitrate = (int) floor($sourceBitrateKbps * 0.95);
+        }
 
         FFMpeg::fromDisk($disk)
             ->open($inputPath)
             ->export()
             ->toDisk($disk)
-            ->inFormat((new X264('aac'))->setKiloBitrate($bitrate))
+            ->addFilter(function ($filters) use ($width, $height) {
+                $filters->resize(new \FFMpeg\Coordinate\Dimension($width, $height));
+            })
+            ->inFormat(
+                (new X264('aac', $this->videoEncoder()))
+                    ->setKiloBitrate($bitrate)
+                    ->setAudioKiloBitrate($audioBitrate)
+                    ->setAdditionalParameters(array_merge(
+                        $this->x264CommonParams($quality, $bitrate),
+                        ['-movflags', '+faststart']
+                    ))
+            )
             ->save($storedPath);
 
         $this->storeVideoRecord('download', $quality, $storedPath);
@@ -206,7 +246,7 @@ class ProcessVideo implements ShouldQueue
             144 => 200,
             240 => 300,
             360 => 500,
-            480 => 1000,
+            480 => 800,
             720 => 1500,
             1080 => 3000,
             default => 1500,
@@ -239,5 +279,100 @@ class ProcessVideo implements ShouldQueue
             'created_at' => now(),
             'updated_at' => now(),
         ]);
+    }
+
+    private function writeMasterPlaylist(string $disk, string $hlsPath, array $variants): void
+    {
+        $lines = [
+            '#EXTM3U',
+            '#EXT-X-VERSION:3',
+        ];
+
+        foreach ($variants as $v) {
+            $lines[] = "#EXT-X-STREAM-INF:BANDWIDTH={$v['bandwidth']},RESOLUTION={$v['resolution']}";
+            $lines[] = $v['uri'];
+        }
+
+        $content = implode("\n", $lines) . "\n";
+        Storage::disk($disk)->put("{$hlsPath}/playlist.m3u8", $content);
+    }
+
+    private function makeVideoFormatForQuality(int $quality, ?int $sourceBitrateKbps = null): X264
+    {
+        $targetVideoBitrate = $this->bitrateFor($quality);
+        if ($sourceBitrateKbps && $targetVideoBitrate > $sourceBitrateKbps) {
+            $targetVideoBitrate = (int) floor($sourceBitrateKbps * 0.95);
+        }
+
+        $audioBitrate = $this->audioBitrateFor($quality);
+
+        return (new X264('aac', $this->videoEncoder()))
+            ->setKiloBitrate($targetVideoBitrate)
+            ->setAudioKiloBitrate($audioBitrate)
+            ->setAdditionalParameters($this->x264CommonParams($quality, $targetVideoBitrate));
+    }
+
+    private function x264CommonParams(int $quality, int $videoBitrateKbps): array
+    {
+        $crf = $this->crfFor($quality);
+        $maxrate = (int) round($videoBitrateKbps * 1.3);
+        $bufsize = (int) round($videoBitrateKbps * 2.0);
+        $preset = env('VIDEO_X264_PRESET', 'faster');
+
+        return [
+            '-preset', $preset,
+            '-crf', (string) $crf,
+            '-maxrate', $maxrate . 'k',
+            '-bufsize', $bufsize . 'k',
+            '-profile:v', 'high',
+            '-level', '4.0',
+            '-g', '48',
+            '-keyint_min', '48',
+            '-sc_threshold', '0',
+            '-pix_fmt', 'yuv420p',
+        ];
+    }
+
+    private function audioBitrateFor(int $quality): int
+    {
+        return match ($quality) {
+            1080, 720 => 128,
+            480 => 112,
+            default => 96,
+        };
+    }
+
+    private function crfFor(int $quality): int
+    {
+        return match ($quality) {
+            1080 => 22,
+            720 => 22,
+            480 => 23,
+            360 => 24,
+            default => 24,
+        };
+    }
+
+    private function videoEncoder(): string
+    {
+        // Set VIDEO_ENCODER=h264_nvenc in env if NVENC is available for higher speed
+        return env('VIDEO_ENCODER', 'libx264');
+    }
+
+    private function probeSourceBitrateKbps(string $disk, string $inputPath): ?int
+    {
+        try {
+            $media = FFMpeg::fromDisk($disk)->open($inputPath);
+            $bitrate = (int) ($media->getVideoStream()->get('bit_rate') ?? 0);
+            if ($bitrate <= 0) {
+                $bitrate = (int) ($media->getFormat()->get('bit_rate') ?? 0);
+            }
+            if ($bitrate > 0) {
+                return (int) round($bitrate / 1000);
+            }
+        } catch (\Throwable $e) {
+            // ignore
+        }
+        return null;
     }
 }
