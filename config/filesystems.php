@@ -49,9 +49,9 @@ return [
 
         'static' => [
             'driver' => 'ftp',
-            'host' => env('STATIC_HOST', '185.252.28.150'),
-            'username' => env('STATIC_USERNAME', 'zanburak'),
-            'password' => env('STATIC_PASSWORD', 'r*9IX)dR91Yu3n'),
+            'host' => env('STATIC_HOST', '78.157.38.113'),
+            'username' => env('STATIC_USERNAME', 'staticza'),
+            'password' => env('STATIC_PASSWORD', 'Milad@4970'),
             'url' => env('STATIC_URL', 'https://static.zanburak.ir'),
             'root' => env('STATIC_ROOT', '/public_html'),
             'passive' => true,
