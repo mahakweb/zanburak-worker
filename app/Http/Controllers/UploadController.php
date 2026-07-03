@@ -140,7 +140,7 @@ class UploadController extends Controller
         if (!$claims) {
             return response()->json(['message' => 'Invalid token'], 401);
         }
-        if (($claims['type'] ?? null) !== 'attachment' && ($claims['type'] ?? null) !== 'poster') {
+        if (! in_array($claims['type'] ?? null, ['attachment', 'poster', 'cover'], true)) {
             return response()->json(['message' => 'Invalid token type'], 403);
         }
         if (($claims['path'] ?? null) !== $request->input('path')) {
@@ -185,6 +185,9 @@ class UploadController extends Controller
             // Delete old path icon and null field, then update to new URL
             $this->removeOldPathIcon($claims['pathId']);
             DB::table('paths')->where('id', $claims['pathId'])->update(['icon' => $url, 'updated_at' => now()]);
+        } elseif (($claims['type'] ?? null) === 'cover' && isset($claims['articleId'])) {
+            $this->removeOldArticleCover($claims['articleId']);
+            DB::table('articles')->where('id', $claims['articleId'])->update(['cover_image' => $url, 'updated_at' => now()]);
         } else {
             // Delete old attachments before inserting new one
             $attachableType = isset($claims['episodeId']) ? 'App\\Models\\Episode' : 'App\\Models\\Course';
@@ -217,6 +220,18 @@ class UploadController extends Controller
         if ($course && $course->poster) {
             $this->deleteFileFromUrl($course->poster);
             DB::table('courses')->where('id', $courseId)->update(['poster' => null, 'updated_at' => now()]);
+        }
+    }
+
+    /**
+     * Remove old article cover image
+     */
+    private function removeOldArticleCover($articleId)
+    {
+        $article = DB::table('articles')->where('id', $articleId)->first();
+        if ($article && $article->cover_image) {
+            $this->deleteFileFromUrl($article->cover_image);
+            DB::table('articles')->where('id', $articleId)->update(['cover_image' => null, 'updated_at' => now()]);
         }
     }
 
