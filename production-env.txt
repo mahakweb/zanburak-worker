@@ -1,36 +1,62 @@
 APP_NAME=zanburak-worker
 APP_ENV=production
 APP_KEY=
-APP_DEBUG=true
+APP_DEBUG=false
 APP_URL=https://worker.zanburak.ir
 
 LOG_CHANNEL=stack
 LOG_LEVEL=debug
 
+# Worker must use the SAME PostgreSQL database as zanburak-backend (not MySQL).
+# If worker runs on a separate server, point DB_HOST to the Postgres host reachable from that server.
+# If worker is colocated with API/DB, use 127.0.0.1 like backend.
 DB_CONNECTION=pgsql
-DB_HOST=87.248.152.25
+DB_HOST=127.0.0.1
 DB_PORT=5432
 DB_DATABASE=zanburak
-DB_USERNAME=remote_miladmahaki
+DB_USERNAME=zanburak
 DB_PASSWORD=Milad@4970
 DB_SSLMODE=prefer
 DB_SEARCH_PATH=public
 
 CACHE_DRIVER=file
-
 FILESYSTEM_DISK=local
 
 QUEUE_CONNECTION=database
 QUEUE_FAILED_DRIVER=database-uuids
-
+# Must exceed ProcessVideo timeout (7200)
+DB_QUEUE_RETRY_AFTER=7500
 
 # Upload token secret MUST match backend
 UPLOAD_TOKEN_SECRET=8f3f0a2b0b4b9d6b7f3e2a961f0c4d9bbd1a2f36e7c4b8a0d93c6efb1d7a3c5
 
-# Optional FFmpeg
 FFMPEG_BINARIES=/usr/bin/ffmpeg
 FFPROBE_BINARIES=/usr/bin/ffprobe
+VIDEO_ENCODER=auto
+VIDEO_NVENC_PRESET=p4
+VIDEO_X264_PRESET=veryfast
+VIDEO_DOWNLOAD_CONCURRENCY=2
+VIDEO_GENERATE_DOWNLOADS=false
+VIDEO_FULL_STREAM_LADDER=false
+VIDEO_STREAM_LADDER=720
 
 FONT_TTF_FOR_WATERMARK=storage/app/fonts/CooperBlack.TTF
+
+# Static / DL FTP (match backend)
+STATIC_HOST=78.157.38.113
+STATIC_USERNAME=staticza
+STATIC_PASSWORD=Milad@4970
+STATIC_URL=https://static.zanburak.ir
+STATIC_ROOT=/public_html
+STATIC_FTP_TIMEOUT=600
+STATIC_DEPLOY_SECRET=uftj30zp4skhe6b7ngl18qymiv9rcxao5wd2
+VIDEO_DISK=dl
+MEDIA_ROOT=D:/zanburak-media
+DL_HOST=185.252.28.150
+DL_USERNAME=dlmahakw
+DL_PASSWORD="o6N8M(]Q7hTzm8"
+DL_ROOT=/public_html
+DL_URL=https://dl.zanburak.ir
+FONT_TTF_FOR_WATERMARK=C:/Windows/Fonts/tahoma.ttf
 
 

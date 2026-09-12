@@ -1,0 +1,15 @@
+[Unit]
+Description=Zanburak Worker — videos queue (FFmpeg processing)
+After=network.target postgresql.service
+
+[Service]
+User={{WEB_USER}}
+Group={{WEB_GROUP}}
+WorkingDirectory={{WORKER_DIR}}
+# retry_after in config/queue.php must be greater than --timeout
+ExecStart={{PHP_PATH}} {{WORKER_DIR}}/artisan queue:work database --queue=videos --sleep=3 --tries=2 --timeout=7200 --memory=1024
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,11 @@
+# Recommended reverse-proxy / PHP limits for large video uploads.
+# Chunked uploads use ~4MB parts, but raising these still helps FTP finalize & single-shot fallbacks.
+#
+# Nginx (server or location for the worker):
+#   client_max_body_size 2048M;
+#
+# PHP:
+#   upload_max_filesize = 64M
+#   post_max_size = 64M
+#   max_execution_time = 0
+#   memory_limit = 512M

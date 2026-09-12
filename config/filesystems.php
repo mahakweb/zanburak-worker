@@ -49,21 +49,34 @@ return [
 
         'static' => [
             'driver' => 'ftp',
-            'host' => env('STATIC_HOST', '78.157.38.113'),
-            'username' => env('STATIC_USERNAME', 'staticza'),
-            'password' => env('STATIC_PASSWORD', 'Milad@4970'),
+            'host' => env('STATIC_HOST', env('STATIC_FTP_HOST')),
+            'username' => env('STATIC_USERNAME', env('STATIC_FTP_USERNAME')),
+            'password' => env('STATIC_PASSWORD', env('STATIC_FTP_PASSWORD')),
             'url' => env('STATIC_URL', 'https://static.zanburak.ir'),
-            'root' => env('STATIC_ROOT', '/public_html'),
+            'root' => env('STATIC_ROOT', env('STATIC_FTP_ROOT', '/public_html')),
             'passive' => true,
+            'timeout' => (int) env('STATIC_FTP_TIMEOUT', 600),
+            'throw' => true,
+        ],
+
+        /*
+         * Shared with backend (same MEDIA_ROOT). Avoids static.zanburak.ir 100MB quota.
+         */
+        'media' => [
+            'driver' => 'local',
+            'root' => env('MEDIA_ROOT', 'D:/zanburak-media'),
             'throw' => true,
         ],
 
         'dl' => [
             'driver' => 'ftp',
-            'host' => env('DL_HOST', '185.252.28.150'),
-            'username' => env('DL_USERNAME', 'dlmahakw'),
-            'password' => env('DL_PASSWORD', ''),
-            'root' => env('DL_ROOT', '/public_html'),
+            'host' => env('DL_HOST', env('DL_FTP_HOST')),
+            'username' => env('DL_USERNAME', env('DL_FTP_USERNAME')),
+            'password' => env('DL_PASSWORD', env('DL_FTP_PASSWORD')),
+            'url' => env('DL_URL', 'https://dl.zanburak.ir'),
+            'root' => env('DL_ROOT', env('DL_FTP_ROOT', '/public_html')),
+            'passive' => true,
+            'timeout' => (int) env('DL_FTP_TIMEOUT', 600),
             'throw' => true,
         ],
 

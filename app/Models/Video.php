@@ -18,6 +18,14 @@ class Video extends Model
         'videoable_id',
         'videoable_type',
         'status',
+        'progress',
+        'error_message',
+        'processing_started_at',
+    ];
+
+    protected $casts = [
+        'processing_started_at' => 'datetime',
+        'progress' => 'integer',
     ];
 
     public function videoable()
