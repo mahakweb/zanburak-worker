@@ -434,6 +434,14 @@ class UploadController extends Controller
         $diskUrl = config("filesystems.disks.$disk.url");
         $url = $diskUrl ? rtrim($diskUrl, '/') . '/' . ltrim($claims['path'], '/') : $claims['path'];
 
+        $webpCreated = false;
+        // Sibling WebP for poster/cover/path-icon so frontend SeoImage can prefer it
+        $shouldWebp = in_array(($claims['type'] ?? null), ['poster', 'cover'], true)
+            || (($claims['type'] ?? null) === 'attachment' && isset($claims['pathId']));
+        if ($shouldWebp) {
+            $webpCreated = $this->maybeWriteWebpSibling($disk, (string) $claims['path'], $file->getRealPath());
+        }
+
         if (($claims['type'] ?? null) === 'poster' && isset($claims['courseId'])) {
             $this->removeOldCoursePoster($claims['courseId']);
             DB::table('courses')->where('id', $claims['courseId'])->update(['poster' => $url, 'updated_at' => now()]);
@@ -470,6 +478,8 @@ class UploadController extends Controller
             'message' => 'File uploaded successfully.',
             'path' => $url,
             'size' => (int) $file->getSize(),
+            'webp_created' => $webpCreated,
+            'webp_type' => $shouldWebp ? 'sibling' : null,
         ], 200);
     }
 
@@ -669,6 +679,18 @@ class UploadController extends Controller
             return;
         }
 
+        $lower = strtolower((string) $url);
+        if (
+            str_contains($lower, 'no-image')
+            || str_contains($lower, 'placeholder')
+            || str_contains($lower, '/default.')
+            || str_contains($lower, 'default.png')
+            || str_contains($lower, 'default.jpg')
+            || str_contains($lower, 'default.webp')
+        ) {
+            return;
+        }
+
         foreach (config('filesystems.disks') as $disk => $config) {
             if (!isset($config['url'])) {
                 continue;
@@ -677,8 +699,22 @@ class UploadController extends Controller
             $baseUrl = rtrim($config['url'], '/');
             if (str_starts_with($url, $baseUrl)) {
                 $relativePath = ltrim(str_replace($baseUrl, '', $url), '/');
-                if (Storage::disk($disk)->exists($relativePath)) {
-                    Storage::disk($disk)->delete($relativePath);
+                try {
+                    if (Storage::disk($disk)->exists($relativePath)) {
+                        Storage::disk($disk)->delete($relativePath);
+                    }
+                } catch (\Throwable $e) {
+                    // ignore
+                }
+                $webpRel = preg_replace('/\.[^.]+$/', '.webp', $relativePath);
+                if ($webpRel && $webpRel !== $relativePath) {
+                    try {
+                        if (Storage::disk($disk)->exists($webpRel)) {
+                            Storage::disk($disk)->delete($webpRel);
+                        }
+                    } catch (\Throwable $e) {
+                        // ignore
+                    }
                 }
                 break;
             }
@@ -728,6 +764,87 @@ class UploadController extends Controller
             'progress' => $progress,
             'error_message' => $errorMessage,
         ], 200);
+    }
+
+    /**
+     * Write a sibling .webp next to poster/cover so SeoImage can prefer it.
+     * Best-effort: failures are logged and never break the upload.
+     *
+     * @return bool true when a usable .webp sibling exists after this call
+     */
+    private function maybeWriteWebpSibling(string $disk, string $originalPath, ?string $localSourcePath): bool
+    {
+        try {
+            if (!$localSourcePath || !is_file($localSourcePath)) {
+                return false;
+            }
+            $ext = strtolower(pathinfo($originalPath, PATHINFO_EXTENSION));
+            if (in_array($ext, ['webp', 'svg', 'gif'], true)) {
+                return true;
+            }
+            if (!function_exists('imagewebp') || !function_exists('imagecreatefromstring')) {
+                return false;
+            }
+
+            $webpRel = preg_replace('/\.[^.]+$/', '.webp', $originalPath);
+            if (!$webpRel || $webpRel === $originalPath) {
+                $webpRel = $originalPath . '.webp';
+            }
+            if (Storage::disk($disk)->exists($webpRel)) {
+                return true;
+            }
+
+            $binary = @file_get_contents($localSourcePath);
+            if ($binary === false || $binary === '') {
+                return false;
+            }
+            $img = @imagecreatefromstring($binary);
+            if ($img === false) {
+                return false;
+            }
+            if (function_exists('imagepalettetotruecolor')) {
+                @imagepalettetotruecolor($img);
+            }
+            if (function_exists('imagealphablending') && function_exists('imagesavealpha')) {
+                @imagealphablending($img, true);
+                @imagesavealpha($img, true);
+            }
+
+            $tmp = tempnam(sys_get_temp_dir(), 'zanwebp_');
+            if ($tmp === false) {
+                imagedestroy($img);
+                return false;
+            }
+            $ok = @imagewebp($img, $tmp, 82);
+            imagedestroy($img);
+            if (!$ok || !is_file($tmp) || filesize($tmp) < 32) {
+                @unlink($tmp);
+                return false;
+            }
+
+            $dir = ltrim(dirname($webpRel), '/');
+            $basename = basename($webpRel);
+            if ($dir && $dir !== '.' && !Storage::disk($disk)->exists($dir)) {
+                Storage::disk($disk)->makeDirectory($dir);
+            }
+            $stream = fopen($tmp, 'rb');
+            $putOk = false;
+            if ($stream) {
+                $putPath = ($dir === '.' || $dir === '') ? $basename : ($dir . '/' . $basename);
+                $putOk = Storage::disk($disk)->put($putPath, $stream) !== false;
+                if (is_resource($stream)) {
+                    fclose($stream);
+                }
+            }
+            @unlink($tmp);
+            return $putOk;
+        } catch (\Throwable $e) {
+            Log::warning('WebP sibling generation failed', [
+                'path' => $originalPath,
+                'error' => $e->getMessage(),
+            ]);
+            return false;
+        }
     }
 
     private function getVideoDuration(string $filePath): int
