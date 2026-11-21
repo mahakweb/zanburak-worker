@@ -42,7 +42,9 @@ class ProcessVideo implements ShouldQueue, ShouldBeUnique
 
     public $timeout = 7200;
 
-    public $tries = 2;
+    public int $tries = 1;
+
+    public bool $deleteWhenMissingModels = true;
 
     public $uniqueFor = 7200;
 
@@ -59,6 +61,8 @@ class ProcessVideo implements ShouldQueue, ShouldBeUnique
 
     /** Disk used for HLS/download outputs (may differ from raw disk). */
     private string $outputDisk = '';
+
+    private int $probeHeight = 720;
 
     public function __construct(Video $video, array $options = [])
     {
@@ -98,15 +102,12 @@ class ProcessVideo implements ShouldQueue, ShouldBeUnique
 
         $rawDisk = (string) ($this->video->disk ?: 'media');
         $rawPath = $this->video->path;
-        // Per-job storage_disk (dl/static/media) wins; else VIDEO_DISK env; else raw disk.
+        // Explicit storage_disk in options wins; fallback to raw video disk; fallback to VIDEO_DISK env
         $configuredDisk = trim((string) ($this->options['storage_disk'] ?? ''));
-        if ($configuredDisk === '') {
-            $configuredDisk = trim((string) env('VIDEO_DISK', ''));
+        if ($configuredDisk === '' || !in_array($configuredDisk, ['dl', 'static', 'media'], true)) {
+            $configuredDisk = in_array($rawDisk, ['dl', 'static', 'media'], true) ? $rawDisk : trim((string) env('VIDEO_DISK', 'dl'));
         }
-        if (!in_array($configuredDisk, ['dl', 'static', 'media'], true)) {
-            $configuredDisk = '';
-        }
-        $remoteDisk = $configuredDisk !== '' ? $configuredDisk : $rawDisk;
+        $remoteDisk = in_array($configuredDisk, ['dl', 'static', 'media'], true) ? $configuredDisk : 'dl';
         $this->outputDisk = $remoteDisk;
 
         if ($this->isCancelled()) {
@@ -134,6 +135,7 @@ class ProcessVideo implements ShouldQueue, ShouldBeUnique
 
         try {
             $probe = $this->probeLocalInput();
+            $this->probeHeight = (int) ($probe['height'] ?? 720);
             if ((int) ($this->video->duration ?? 0) <= 0 && ($probe['duration'] ?? 0) > 0) {
                 DB::table('videos')->where('id', $this->video->id)->update([
                     'duration' => $probe['duration'],
@@ -196,6 +198,11 @@ class ProcessVideo implements ShouldQueue, ShouldBeUnique
 
                 if ($wantStream) {
                     $this->encodeEncryptedStreamLocal($streamQualities, $sourceBitrateKbps, $remoteStream, $remoteDisk);
+
+                    if (!empty($this->options['thumbnails_enabled'])) {
+                        $this->generateScrubbingThumbnails($remoteStream, $remoteDisk);
+                    }
+
                     $this->markStatus('processed', [
                         'progress' => 75,
                         'error_message' => null,
@@ -236,6 +243,13 @@ class ProcessVideo implements ShouldQueue, ShouldBeUnique
                 'progress' => 100,
                 'error_message' => null,
             ]);
+
+            if ($videoableType === 'App\\Models\\Episode' && ($this->video->duration ?? 0) > 0) {
+                DB::table('episodes')->where('id', $videoableId)->update([
+                    'total_time' => (string) $this->video->duration,
+                    'updated_at' => now(),
+                ]);
+            }
 
             Log::info('ProcessVideo completed', [
                 'video_id' => $this->video->id,
@@ -309,6 +323,18 @@ class ProcessVideo implements ShouldQueue, ShouldBeUnique
                     'video_id' => $this->video->id,
                 ]);
                 return;
+            }
+
+            // Immediately mark failed in DB so it never stays stuck in "processing"
+            $message = mb_substr($e->getMessage(), 0, 2000);
+            try {
+                DB::table('videos')->where('id', $this->video->id)->update([
+                    'status' => 'failed',
+                    'error_message' => $message,
+                    'updated_at' => now(),
+                ]);
+            } catch (Throwable $dbEx) {
+                // ignore
             }
 
             // Preserve raw for retry when FTP output upload failed after inbox was used.
@@ -638,7 +664,8 @@ class ProcessVideo implements ShouldQueue, ShouldBeUnique
         }
 
         $wm = $this->watermark;
-        $margin = max(18, (int) round(min($width, $height) * 0.035));
+        $scaleRatio = $height / 720.0;
+        $margin = max(2, (int) round($height * 0.03));
 
         if (($wm['type'] ?? '') === 'image') {
             $path = str_replace('\\', '/', (string) ($wm['image_abs'] ?? ''));
@@ -649,12 +676,12 @@ class ProcessVideo implements ShouldQueue, ShouldBeUnique
 
             // Pre-rendered text watermark: scale by target height; otherwise by width fraction.
             if (!empty($wm['render_h'])) {
-                $targetH = max(20, (int) round(((int) $wm['render_h']) * ($height / 720)));
+                $targetH = max(12, (int) round(((int) $wm['render_h']) * $scaleRatio));
                 $targetH -= $targetH % 2;
                 $scaleFilter = sprintf('scale=-1:%d', $targetH);
                 $radiusPx = 0;
             } else {
-                $wmW = max(24, (int) round($width * (float) $wm['image_scale']));
+                $wmW = max(16, (int) round($width * (float) ($wm['image_scale'] ?? 0.18)));
                 $wmW -= $wmW % 2;
                 $scaleFilter = sprintf('scale=%d:-1', $wmW);
                 $radiusPx = max(0, (int) round(((int) ($wm['image_radius'] ?? 0)) * ($wmW / 200)));
@@ -678,7 +705,8 @@ class ProcessVideo implements ShouldQueue, ShouldBeUnique
             );
         }
 
-        $fontSize = max(14, (int) round(((int) $wm['font_size']) * ($height / 720)));
+        $baseFontSize = (int) ($wm['font_size'] ?? 24);
+        $fontSize = max(7, (int) round($baseFontSize * $scaleRatio));
         $fontEsc = str_replace(':', '\\:', str_replace('\\', '/', (string) $wm['font']));
         $textEsc = $this->escapeFfmpegDrawText((string) $wm['text']);
         [$x, $y] = $this->watermarkDrawTextXy((string) $wm['position'], $margin);
@@ -695,14 +723,15 @@ class ProcessVideo implements ShouldQueue, ShouldBeUnique
         ];
 
         if (!empty($wm['border_enabled']) && (int) ($wm['border_width'] ?? 0) > 0) {
-            $parts[] = 'borderw=' . (int) $wm['border_width'];
+            $borderW = max(1, (int) round(((int) $wm['border_width']) * $scaleRatio));
+            $parts[] = 'borderw=' . $borderW;
             $parts[] = 'bordercolor=' . $this->ffmpegColor((string) $wm['border_color'], min(1.0, $opacity + 0.1));
         } else {
             $parts[] = 'borderw=0';
         }
 
         if (!empty($wm['bg_enabled'])) {
-            $pad = max(0, (int) round(((int) ($wm['bg_padding'] ?? 10)) * ($height / 720)));
+            $pad = max(1, (int) round(((int) ($wm['bg_padding'] ?? 8)) * $scaleRatio));
             $parts[] = 'box=1';
             $parts[] = 'boxborderw=' . $pad;
             $parts[] = 'boxcolor=' . $this->ffmpegColor(
@@ -831,7 +860,7 @@ class ProcessVideo implements ShouldQueue, ShouldBeUnique
     /** @return array{0:string,1:string} */
     private function watermarkDrawTextXy(string $position, int $margin = 24): array
     {
-        $m = (string) max(8, $margin);
+        $m = (string) max(1, $margin);
 
         return match ($position) {
             'top-left' => [$m, $m],
@@ -845,7 +874,7 @@ class ProcessVideo implements ShouldQueue, ShouldBeUnique
     /** @return array{0:string,1:string} */
     private function watermarkOverlayXy(string $position, int $margin = 24): array
     {
-        $m = (string) max(8, $margin);
+        $m = (string) max(1, $margin);
 
         return match ($position) {
             'top-left' => [$m, $m],
@@ -883,6 +912,12 @@ class ProcessVideo implements ShouldQueue, ShouldBeUnique
             $bitrate = (int) ($media->getVideoStream()->get('bit_rate') ?? 0);
             if ($bitrate <= 0) {
                 $bitrate = (int) ($media->getFormat()->get('bit_rate') ?? 0);
+            }
+            if ($bitrate <= 0 && $duration > 0) {
+                $rawAbs = Storage::disk('local')->path($this->localInputRelative);
+                if (file_exists($rawAbs)) {
+                    $bitrate = (int) round((filesize($rawAbs) * 8) / $duration);
+                }
             }
             if ($bitrate > 0) {
                 $bitrateKbps = (int) round($bitrate / 1000);
@@ -1020,6 +1055,9 @@ class ProcessVideo implements ShouldQueue, ShouldBeUnique
         $exporter->save($masterRel);
         $this->updateProgress(85);
         $this->uploadDirectoryToRemote('local', $localOutRel, $remoteDisk, $remoteTrailerPath);
+        if (!empty($this->options['thumbnails_enabled'])) {
+            $this->generateScrubbingThumbnails($remoteTrailerPath, $remoteDisk);
+        }
         $this->storeVideoRecord('trailer', null, $remoteTrailerPath . '/playlist.m3u8');
     }
 
@@ -1089,8 +1127,11 @@ class ProcessVideo implements ShouldQueue, ShouldBeUnique
         foreach ($qualities as $quality) {
             [$width, $height] = $this->dimensionsFor($quality);
             $bitrate = $this->bitrateFor($quality);
-            if ($sourceBitrateKbps && $bitrate > $sourceBitrateKbps) {
-                $bitrate = (int) floor($sourceBitrateKbps * 0.95);
+            if ($sourceBitrateKbps && $sourceBitrateKbps > 0) {
+                $sourceH = max(144, (int) ($this->probeHeight ?: 720));
+                $ratio = min(1.0, (float) $quality / $sourceH);
+                $scaledMaxBitrate = (int) round($sourceBitrateKbps * pow($ratio, 1.2));
+                $bitrate = min($bitrate, max(100, $scaledMaxBitrate));
             }
             $audioBitrate = $this->audioBitrateFor($quality);
             $relDir = "{$localOutRel}/{$quality}p";
@@ -1768,8 +1809,11 @@ class ProcessVideo implements ShouldQueue, ShouldBeUnique
     private function makeVideoFormatForQuality(int $quality, ?int $sourceBitrateKbps = null): X264
     {
         $targetVideoBitrate = $this->bitrateFor($quality);
-        if ($sourceBitrateKbps && $targetVideoBitrate > $sourceBitrateKbps) {
-            $targetVideoBitrate = (int) floor($sourceBitrateKbps * 0.95);
+        if ($sourceBitrateKbps && $sourceBitrateKbps > 0) {
+            $sourceH = max(144, (int) ($this->probeHeight ?: 720));
+            $ratio = min(1.0, (float) $quality / $sourceH);
+            $scaledMaxBitrate = (int) round($sourceBitrateKbps * pow($ratio, 1.2));
+            $targetVideoBitrate = min($targetVideoBitrate, max(100, $scaledMaxBitrate));
         }
 
         $encoder = $this->videoEncoder();
@@ -1915,5 +1959,49 @@ class ProcessVideo implements ShouldQueue, ShouldBeUnique
         Log::info('ProcessVideo encoder selected', ['encoder' => $resolved]);
 
         return $resolved;
+    }
+
+    private function generateScrubbingThumbnails(string $remoteStream, string $remoteDisk): void
+    {
+        try {
+            $localRawAbs = Storage::disk('local')->path($this->localInputRelative);
+            if (!file_exists($localRawAbs)) {
+                return;
+            }
+
+            $thumbLocalDir = 'thumbnails_' . (int) $this->video->id;
+            $thumbAbsDir = Storage::disk('local')->path($thumbLocalDir);
+            if (!is_dir($thumbAbsDir)) {
+                mkdir($thumbAbsDir, 0777, true);
+            }
+
+            $ffmpeg = $this->ffmpegBinary();
+            $pattern = $thumbAbsDir . DIRECTORY_SEPARATOR . 'thumb_%04d.jpg';
+            $cmd = [
+                $ffmpeg,
+                '-hide_banner',
+                '-loglevel', 'error',
+                '-i', $localRawAbs,
+                '-vf', 'fps=1/5,scale=160:90',
+                '-q:v', '5',
+                $pattern,
+            ];
+
+            Process::timeout(180)->run($cmd);
+
+            $files = glob($thumbAbsDir . DIRECTORY_SEPARATOR . '*.jpg');
+            if (!empty($files)) {
+                // Ensure thumbnails are stored inside the episode's own stream directory
+                // $remoteStream is e.g. "stream/{courseSlug}/{episodeId}"
+                $remoteThumbPath = rtrim(str_replace('\\', '/', $remoteStream), '/') . '/thumbnails';
+                $this->uploadDirectoryToRemote('local', $thumbLocalDir, $remoteDisk, $remoteThumbPath);
+            }
+            Storage::disk('local')->deleteDirectory($thumbLocalDir);
+        } catch (Throwable $e) {
+            Log::warning('Thumbnails generation skipped or failed', [
+                'video_id' => $this->video->id,
+                'error' => $e->getMessage(),
+            ]);
+        }
     }
 }

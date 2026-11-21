@@ -284,6 +284,7 @@ class ProcessController extends Controller
             'download_qualities' => $downloadQualities,
             'outputs' => $outputs,
             'storage_disk' => $storageDisk,
+            'thumbnails_enabled' => $request->boolean('thumbnails_enabled'),
             'watermark' => [
                 'enabled' => (bool) ($watermark['enabled'] ?? false),
                 'type' => $wmType,
